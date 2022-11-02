@@ -10,10 +10,9 @@ We have 4 models trained so far, a base and a large version of a T5v1.1 and an m
 
 (results soon)
 
-## Section 2 - T5x training scripts
+## Section 2 - Challenges
 
-Note that we only do pretraining, i.e. span corruption, as we did not have any supervised tasks at the moment of training.
-Also note that the files here were changed many times on-site, like when a model trained to 2M steps, and we decided to train in for another 1M and then another 1M, so you need to adjust params to your liking. 
+The biggest challenge when fine-tunning a LLM is the dataset size. We can use Pytorch XLA to create a training process on each core of the TPU. If the data fits in the memory of one TPU core than is easy. You just read the whole dataset in memory, and the dataloader will parallelie the batches between the TPU cores. The dataset will be a direct mapping of each data point to a certain index. This way we can use a distributed random sampler which will fetch batches from different locations in the dataset and send them to each core of the TPU. But what if the dataset does not fit into memory. Than we can use IterableDatasets, which will not have acces to random indexes in the dataset and it will not work by default with distributed sampler. So we had to implement the distributed sampler manualy.
 
 In essence, a model requires 4 files for training:
 
