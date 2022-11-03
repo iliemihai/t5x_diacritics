@@ -6,7 +6,7 @@ The first section of the readme presents our fine-tuned model, the second sectio
 
 ## Section 1 - Models and results
 
-We have 1 models fine-tuned so far, a [base mT5](https://huggingface.co/iliemihai/mt5-base-romanian-diacritics) . 
+We have 1 modelsfine-tuned so far, a [mt5x-base model](https://huggingface.co/iliemihai/mt5-base-romanian-diacritics) . 
 
 [(eval score soon)]()
 
@@ -69,7 +69,6 @@ train_dataset = DistributedIterableDataset(train_data, rank, world_size)
 ```
 
 * ``world_size`` represents the number of TPU cores, in our case 8.
-* 
 
 2. Define the string processing function:
    
@@ -92,9 +91,8 @@ def my_collate(batch):
 
     return text_batch_source_out, text_batch_target_out
 ```
-* set the dataset name, and use_auth_token to True if the dataset is private 
-* set streaming to True as we don't have to deal with disk space
-* take care of the task name, as it's referenced in the gin file above
+* the function will tokenize the string and replace the pad tokens with -100.
+
 
 3. Define dataset, model, tokenizer, optimzer: 
 
@@ -127,6 +125,7 @@ optimizer = Adafactor(
                     warmup_init=False,
            )
 ```
+* use Adafactor optimizer for better results
 
 4. Define traininig loop:
 
@@ -173,7 +172,8 @@ FLAGS={}
 xmp.spawn(_mp_fn, args=(FLAGS,), nprocs=8, start_method='fork')
 ```
 
-* ``PROJECT_DIR=${HOME}"/models/t5x_models"`` note where you save the models (see Section 3)
+* In the training loop we will use a distributed sampler which will fetch batches from the straming datasets and will send them to each TPU core.
+* We will use the XLA spawn function to launch a separate process on each TPU core
 
 
 
