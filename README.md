@@ -52,11 +52,24 @@ class DistributedIterableDataset(IterableDataset):
                         "source": unidecode.unidecode(data["text"])+"</s>",
                         "target": data["text"]+"</s>"
                       }
+                      
+world_size = xm.xrt_world_size()
+rank = xm.get_ordinal()
+torch.distributed.init_process_group(
+        backend='gloo',
+        init_method='tcp://127.0.0.1:5678',
+        world_size=world_size,
+        rank=rank,
+)
+
+# data
+train_data = load_dataset("dumitrescustefan/diacritic", split="train", streaming=True)
+
+train_dataset = DistributedIterableDataset(train_data, rank, world_size)
 ```
 
-* take care that the ``MIXTURE_OR_TASK_NAME`` is set to the correct task found in the tasks.py file
-* ``TASK_FEATURE_LENGTHS = {"inputs": 512, "targets": 256}`` means that the encoder has the input size 512 and the decoder will generate up to 256 tokens.
-
+* ``world_size`` represents the number of TPU cores, in our case 8.
+* 
 
 2. Define the string processing function:
    
@@ -98,18 +111,6 @@ def my_collate(batch):
     device = xm.xla_device()
     model.to(device)
     # distributed params
-    world_size = xm.xrt_world_size()
-    rank = xm.get_ordinal()
-    torch.distributed.init_process_group(
-        backend='gloo',
-        init_method='tcp://127.0.0.1:5678',
-        world_size=world_size,
-        rank=rank,
-    )
-    # data
-    train_data = load_dataset("dumitrescustefan/diacritic", split="train", streaming=True)
-
-    train_dataset = DistributedIterableDataset(train_data, rank, world_size)
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=my_collate, pin_memory=True, drop_last = True)
 
@@ -130,7 +131,7 @@ def my_collate(batch):
 4. Define traininig loop:
 
 ```python
-step = 0
+    step = 0
     # Training
     for epoch in tqdm(range(NUM_EPOCHS)):
         xm.master_print(f"Epoch:", epoch)
