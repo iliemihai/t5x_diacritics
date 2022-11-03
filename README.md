@@ -1,123 +1,181 @@
-# Fine-tuning Romanian T5x model to restore diacritics 
+# Fine-tuning Romanian T5x model on TPU
 
-In this repo we will learn how to fine-tune a [T5x](https://github.com/google-research/t5x) model on TPUs using Pytorch-XLA.
+In this repo we will learn how to fine-tune a [T5x](https://github.com/google-research/t5x) model on TPUs for Romanian diacritics restauration.
 
-The first section of the readme presents our trained models, the second section discusses the training scripts while the third section discusses the steps needed to setup the environment on Google Cloud, the actual training and monitoring and the final checkpoint conversions to PyTorch. 
+The first section of the readme presents our fine-tuned model, the second sections discusses the challenges we faced when trying to train the model and the third section discusses the training script with PyTorch-XLA. 
 
 ## Section 1 - Models and results
 
-We have 1 models trained so far, a base mT5. 
+We have 1 models fine-tuned so far, a [base mT5](https://huggingface.co/iliemihai/mt5-base-romanian-diacritics) . 
 
-(results soon)
+[(eval score soon)]()
 
 ## Section 2 - Challenges
 
-    The biggest challenge when fine-tunning a LLM is the dataset size. We can use Pytorch XLA to create a training process on each core of the TPU. If the data fits in the memory of one TPU core than is easy. You just read the whole dataset in the TPU memory, and the dataloader will parallelize the batches between the TPU cores. Reading the whole dataset into memory will help with random sampling. The dataset will be like a map which links each data point to a certain index. This way we can use a distributed random sampler which will fetch batches from different locations in the dataset and send them to each core of the TPU.
-    But what if the dataset does not fit into memory. Here we can use datasets streaming and IterableDatasets, which will not have acces to random indexes in the dataset and it will not work by default with distributed sampler. Streaming datasets means that the data is downloaded progressively as you iterate over the dataset. So we had to implement the distributed sampler manualy.
+The biggest challenge when fine-tunning a LLM is the dataset size. We can use Pytorch XLA to create a training process on each core of the TPU. If the data fits in the memory of one TPU core than is easy. You just read the whole dataset in the TPU memory, and the dataloader will parallelize the batches between the TPU cores. Reading the whole dataset into memory will help with random sampling. The dataset will be like a map which links each data point to a certain index. This way we can use a distributed random sampler which will fetch batches from different locations in the dataset and send them to each core of the TPU.
 
+But what if the dataset does not fit into memory. Here we can use datasets streaming and IterableDatasets, which will not have acces to random indexes in the dataset and it will not work by default with distributed sampler. Streaming datasets means that the data is downloaded progressively as you iterate over the dataset. So we had to implement the distributed sampler manualy.
 
-Let's take an example and say we want to train a T5x base model from scratch. Thus, we have model=t5x and size=base. 
+Because Pytorch loads into memory the model's state, the optimizer state and the dataset, in order to be able to train a large model, we had to reduce the optimzer state. That's why we chose the Adafactor optimzer instead of Adam. 
 
-1. In ``ro_t5x_base.gin``:
-   * notice the second line with the reference to the gin file. Change accordingly to match filename. Same for the import of the python file.
-   * in this case we train from scratch with our vocab so we set:
-```bash
-network.T5Config:
-  vocab_size = 64000
+## Section 3 - Example
+Let's take an example and say we want to train a T5x base model from scratch.
+The setup assumes that you have:
+1. a corpus in the HuggingFace dataset format already uploaded and available
+2. the corpus is to big to fit in the TPU's memory
 
-# Vocabulary (shared by encoder and decoder)
-VOCABULARY = @seqio.SentencePieceVocabulary()
-seqio.SentencePieceVocabulary.sentencepiece_model_file = "<bucket path to sentencepiece model file>"
+ In this case we should use `dataset streaming`. The data is downloaded progressively as you iterate over the dataset. We will use the [diacritics corpus](https://huggingface.co/datasets/dumitrescustefan/diacritic) from Huggingface.
+
+1. Define the  ``Dataset``:
+
+```python
+class DistributedIterableDataset(IterableDataset):
+    def __init__(self, dataset, rank, world_size):
+        self.dataset = dataset
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        worker_info = get_worker_info()
+        mod = self.world_size
+        shift = self.rank
+
+        if worker_info:
+            mod *= worker_info.num_workers
+            shift = self.rank * worker_info.num_workers + worker_info.id
+
+        ind = 0
+        for data in self.dataset:
+            ind += 1
+            if (ind + shift) % mod == 0:
+                yield {
+                        "source": unidecode.unidecode(data["text"])+"</s>",
+                        "target": data["text"]+"</s>"
+                      }
 ```
 
-    * take care that the ``MIXTURE_OR_TASK_NAME`` is set to the correct task found in the tasks.py file
-    * ``TASK_FEATURE_LENGTHS = {"inputs": 512, "targets": 256}`` means that the encoder has the input size 512 and the decoder will generate up to 256 tokens.
-    * ``TRAIN_STEPS = 2_000_000`` set to the number of steps you want to train to.
-    * to start from an existing chekpoint (like we did for mT5), set ``INITIAL_CHECKPOINT_PATH = "gs://t5-data/pretrained_models/t5x/mt5_base/checkpoint_1000000"``
-    * set ``PjitPartitioner.num_partitions = 2`` to a higher number if you get out of memory, and decrease the TASK_FEATURE_LENGTHS. (see official t5x repo)
+* take care that the ``MIXTURE_OR_TASK_NAME`` is set to the correct task found in the tasks.py file
+* ``TASK_FEATURE_LENGTHS = {"inputs": 512, "targets": 256}`` means that the encoder has the input size 512 and the decoder will generate up to 256 tokens.
 
-2. In ``ro_t5x_base_tasks.py``:
-   * set vocabulary with ``vocabulary = seqio.SentencePieceVocabulary('gs://myv4-bucket/sentencepiece/ro.model', extra_ids=0)``
-   * adapt the following script in the final part of the file:
+
+2. Define the string processing function:
    
 ```python
-dataset_name = 'dumitrescustefan/rlm'
-dataset_params = {"path": dataset_name, "use_auth_token": True, "streaming": True}
-dataset_shapes = None
-TaskRegistry.add(
-    "rlm_span_corruption_stream",
-    source=seqio.FunctionDataSource(
-        dataset_fn=functools.partial(dataset_fn, dataset_params=dataset_params),
-        splits=("train", "validation"),
-        caching_permitted=False,
-        num_input_examples=dataset_shapes,
-    ),
-    preprocessors=[
-        functools.partial(
-            target_to_key, key_map={
-                "inputs": None,
-                "targets": None,
-            }, target_key="targets"),
-        seqio.preprocessors.tokenize,        
-        preprocessors.span_corruption,
-        seqio.preprocessors.append_eos_after_trim,
-    ],
-    output_features={"targets": DEFAULT_OUTPUT_FEATURES["targets"]},
-    metric_fns=[]
-)
+def my_collate(batch):
+    text_batch_source = []
+    text_batch_target = []
+    for instance in batch:
+
+        text_batch_source.append(instance["source"])
+        text_batch_target.append(instance["target"])
+
+    text_batch_source_out = tokenizer(text_batch_source,
+                           max_length=max_length, truncation=True, padding="max_length", add_special_tokens=True, return_tensors="pt")
+    text_batch_target_out = tokenizer(text_batch_target,
+                                      max_length=max_length, truncation=True, padding="max_length", add_special_tokens=True,return_tensors="pt")
+
+    text_batch_source_out["input_ids"][text_batch_source_out["input_ids"][:, :] == tokenizer.pad_token_id] = -100
+    text_batch_source_out["input_ids"][text_batch_source_out["input_ids"][:, :] == tokenizer.pad_token_id] = -100
+
+    return text_batch_source_out, text_batch_target_out
 ```
    * set the dataset name, and use_auth_token to True if the dataset is private 
    * set streaming to True as we don't have to deal with disk space
    * take care of the task name, as it's referenced in the gin file above
 
-3. In ``ro_t5x_base_pretrain.gin``: 
-   * set ``BATCH_SIZE`` as large as possible 
-   * in ``utils.SaveCheckpointConfig:`` set period to 100K so it saves every 100K steps, and ``keep`` to keep the last number of checkpoints.
+3. Define dataset, model, tokenizer, optimzer: 
 
-4. In ``ro_t5x_base.sh``:
+```python
+    NUM_EPOCHS = 10
+    max_length = 256
+    batch_size = 8
+    num_workers = 64
+    save_steps = 50000
+    model_path = "dumitrescustefan/mt5-base-romanian"
+    tokenizer = T5TokenizerFast.from_pretrained(model_path)
+    model = MT5ForConditionalGeneration.from_pretrained(model_path)
+    model.config.max_length = max_length
+    device = xm.xla_device()
+    model.to(device)
+    # distributed params
+    world_size = xm.xrt_world_size()
+    rank = xm.get_ordinal()
+    torch.distributed.init_process_group(
+        backend='gloo',
+        init_method='tcp://127.0.0.1:5678',
+        world_size=world_size,
+        rank=rank,
+    )
+    # data
+    train_data = load_dataset("dumitrescustefan/diacritic", split="train", streaming=True)
+
+    train_dataset = DistributedIterableDataset(train_data, rank, world_size)
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=my_collate, pin_memory=True, drop_last = True)
+
+    optimizer = Adafactor(
+                    model.parameters(),
+                    lr=1e-4,
+                    eps=(1e-30, 1e-3),
+                    clip_threshold=1.0,
+                    decay_rate=-0.8,
+                    beta1=None,
+                    weight_decay=0.0,
+                    relative_step=False,
+                    scale_parameter=False,
+                    warmup_init=False,
+               )
+```
+
+4. Define traininig loop:
+
+```python
+step = 0
+    # Training
+    for epoch in tqdm(range(NUM_EPOCHS)):
+        xm.master_print(f"Epoch:", epoch)
+        para_loader = pl.ParallelLoader(train_dataloader, [device])
+
+        for batch in tqdm(para_loader.per_device_loader(device)):
+            model.train()
+
+            batch_source, batch_target = batch[0], batch[1]
+            lm_labels = batch_target["input_ids"].to(device)
+
+            input_ids = batch_source["input_ids"].to(device)
+            attention_mask_enc = batch_source["attention_mask"].to(device)
+            labels = batch_target["input_ids"].to(device)
+            attention_mask_dec = batch_target['attention_mask'].to(device)
+            optimizer.zero_grad()
+
+            outputs = model(input_ids=input_ids,
+                            attention_mask=attention_mask_enc,
+                            labels=labels, 
+                            decoder_attention_mask=attention_mask_dec)
+            loss = outputs.loss
+            xm.master_print("Loss:", loss.item())
+            loss.backward()
+            optimizer.step()
+            xm.mark_step()
+            step += 1
+
+            if step % save_steps == 0:
+                model.save_pretrained("finetuned_t5_diacritics_"+str(save_steps))
+
+
+
+# Start training processes
+def _mp_fn(rank, flags):
+    main()
+
+FLAGS={}
+xmp.spawn(_mp_fn, args=(FLAGS,), nprocs=8, start_method='fork')
+```
    * ``PROJECT_DIR=${HOME}"/models/t5x_models"`` note where you save the models (see Section 3)
    * ``T5X_DIR="../../t5x"`` directory where the t5x is cloned (see Section 3)
    * ``MODEL_DIR="gs://myv4-bucket/ro_t5x_base"`` where to save the checkpoints and all the training logs and other files (bucket)
    * ``GIN_FILE="ro_t5x_base.gin"`` link to the gin file above
 
-
-## Section 3 - Hands-on: TPU setup, training, monitoring and checkpoint conversion  
-
-The setup assumes you already have:
-1. a corpus in the HuggingFace dataset format already uploaded and available
-2. a sentencepiece vocabulary if you want to train from scratch (the mT5x models use the vocab file on the public bucket)
-
-#### TPU and bucket creation 
-
-First, set up a bucket where you'll keep all the training output. Always use a bucket in the same zone as the TPUs. I've done this in GCP's web UI very fast. If you have trouble accessing the bucket from the TPUs, check that the service account has access to the bucket, and add all the Storage Legacy and Storage Owner permissions to the service account of the TPU created in the next step.  
-
-Next, let's create a TPU VM. For a v4-8, run the following in the GCP console:
-```bash
-gcloud alpha compute tpus tpu-vm create <tpu_name> --zone <zone> --accelerator-type v4-8 --version v2-alpha-tpuv4 --subnetwork=tpusubnet
-```
-For anything larger than a v4-8: 
-```bash
-gcloud alpha compute tpus tpu-vm create <tpu_name> --zone <zone> --accelerator-type v4-32 --version v2-alpha-tpuv4-pod --subnetwork=tpusubnet
-```
-Note that for a TPU v3 use the ``v2-alpha`` image, without the ``--subnetwork`` param. I've only run this on v4s, so can't make guarantees the training will work.
-
-To ssh into a TPU VM:
-```bash
-gcloud alpha compute tpus tpu-vm ssh <tpu_name> --zone <zone>
-```
-
-*!!!!!!!!!!!!!!!!!!!!!!!!!!!!*
-
-What I wish somebody would have told me earlier (thank Per!) and it's not written in GCP or at least does not stand out, is that for *anything larger than a v8*, like a v16 or v32, **the TPU is actually v8s wrapped together**.
-
-This means that a v16 is 2*v8s, and *you have to ssh and run the training script into each v8 slice!!*
-
-For example, a v32 has 4 slices; to ssh into each, use the ``--worker`` param, starting from 0. To ssh into the fourth v8 slice, run:
-```bash
-gcloud alpha compute tpus tpu-vm ssh <tpu_name> --zone <zone> --worker 3
-```
-
-*!!!!!!!!!!!!!!!!!!!!!!!!!!!!*
 
 #### TPU setup
 
@@ -156,99 +214,6 @@ git clone https://github.com/dumitrescustefan/t5x_models.git
 cd t5x_models
 ```
  
-
-#### Training start
-
-After you've run the setup on the v8 or on each TPU slice (if you run on v16s or larger), then keep a console in each slice and run the starting script:
-
-```bash
-git pull && bash ro_t5x_base.sh (your .sh file here)
-```
-
-Why this way? Because for example, on a v4-32 there are 4 slices where you need to run the bash file. And almost certainly you'll have some error in the training files. As each slice is separate, you have to copy everything 4 times. So why not better edit it in a single place, git push it, and then on each slice just git pull and run the training script? This is Per's suggestion and it saved us a lot of time!
-
-#### Training monitoring
-
-My way of bare-bone monitoring (as the TPUs v4 were MUCH more stable than the TPUv3s I've played with), is to run this in a Colab:
-
-```python
-from google.colab import auth
-auth.authenticate_user()
-```
-
-This will authenticate you in Colab. Next, let's copy some log files from the bucket and start a tensorboard UI:
-```bash
-!rm -rf logs/ && mkdir logs
-!gsutil -m cp gs://myv4-bucket/ro_t5x_base/train/* logs/
-
-%reload_ext tensorboard
-%tensorboard --logdir logs
-```
-
-Run this from time to time to see how the training loss evolves. 
-
-On a v4-32, the t5x-large trained to 4M steps in about 3 weeks. On a v4-8, a t5x-base trains 1M steps in less than a week. 
-
-#### Checkpoint conversion
-
-When converting the checkpoints you have to install the following dependency:
-
-``pip3 install --upgrade tensorstore==0.1.13``
-
-In ``convert.sh`` script you will have to modify the path to the folder with checkpoints:
-
-``folder=CHECKPOINTS_PATH``
-
-For example ``folder=mt5x-base``, and after run:
-
-``bash convert.sh``
-
-This will convert checkpoints from Tensorflow to Flax and Pytorch.
-
-In each checkpoint path you will have to copy the tokenizer files:
-
-```
-t5x_models
-│   convert.sh
-│   convert_flax_to_pytorch.py
-│   convert_t5x_checkpoint_to_flax.py
-├── mt5x-base
-│           ├── checkpoint_4000000/
-│                                 ├── special_tokens_map.json
-│                                 ├── spiece.model
-│                                 ├── tokenizer.json
-│                                 ├── tokenizer_config.json
-│           ├── checkpoint_3900000/
-│                                 ├── special_tokens_map.json
-│                                 ├── spiece.model
-│                                 ├── tokenizer.json
-│                                 ├── tokenizer_config.json
-│           ...
-├── mt5x-base_fl
-│           ├── checkpoint_4000000/
-│                                 ├── special_tokens_map.json
-│                                 ├── spiece.model
-│                                 ├── tokenizer.json
-│                                 ├── tokenizer_config.json
-│           ├── checkpoint_3900000/
-│                                 ├── special_tokens_map.json
-│                                 ├── spiece.model
-│                                 ├── tokenizer.json
-│                                 ├── tokenizer_config.json
-│           ...
-├── mt5x-base_pt
-│           ├── checkpoint_4000000/
-│                                 ├── special_tokens_map.json
-│                                 ├── spiece.model
-│                                 ├── tokenizer.json
-│                                 ├── tokenizer_config.json
-│           ├── checkpoint_3900000/
-│                                 ├── special_tokens_map.json
-│                                 ├── spiece.model
-│                                 ├── tokenizer.json
-│                                 ├── tokenizer_config.json
-│           ...
-```
 
 ## Acknowledgements
 
