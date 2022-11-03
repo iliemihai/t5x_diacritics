@@ -179,12 +179,29 @@ xmp.spawn(_mp_fn, args=(FLAGS,), nprocs=8, start_method='fork')
 
 #### TPU setup
 
-After ssh-ing into *each* pod slice, run directly: 
+After ssh-ing on the TPU machine run directly: 
 
 ```bash
-
+cd /usr/share/
+sudo git clone -b release/1.10 --recursive https://github.com/pytorch/pytorch 
+cd pytorch/
+sudo git clone -b r1.10 --recursive https://github.com/pytorch/xla.git
+cd xla/
+yes | sudo pip3 uninstall torch_xla
+yes | sudo pip3 uninstall torch
+yes | sudo pip3 uninstall torch_vision
+sudo pip3 install torch==1.10.0
+sudo pip3 install torchvision==0.11.1
+sudo pip3 install https://storage.googleapis.com/tpu-pytorch/wheels/tpuvm/torch_xla-1.10-cp38-cp38-linux_x86_64.whl
+sudo mv /usr/lib/libtpu.so /tmp
+sudo /snap/bin/gsutil cp gs://tpu-pytorch/v4_wheel/110/libtpu.so /lib/libtpu.so
 ```
- 
+
+Also don't forget to configure the devices:
+
+```bash
+export XRT_TPU_CONFIG="localservice;0;localhost:51011"
+```
 
 ## Acknowledgements
 
@@ -193,5 +210,5 @@ Many thanks to the **Tensorflow Research Credits (TRC) team** without which thes
 
 _Yours truly,_ 
 
-_[Stefan Dumitrescu](https://github.com/dumitrescustefan), [Mihai Ilie](https://github.com/iliemihai)
+_[Stefan Dumitrescu](https://github.com/dumitrescustefan), [Mihai Ilie](https://github.com/iliemihai)_
 
