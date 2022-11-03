@@ -6,20 +6,15 @@ The first section of the readme presents our trained models, the second section 
 
 ## Section 1 - Models and results
 
-We have 4 models trained so far, a base and a large version of a T5v1.1 and an mT5.
+We have 1 models trained so far, a base mT5. 
 
 (results soon)
 
 ## Section 2 - Challenges
 
-The biggest challenge when fine-tunning a LLM is the dataset size. We can use Pytorch XLA to create a training process on each core of the TPU. If the data fits in the memory of one TPU core than is easy. You just read the whole dataset in memory, and the dataloader will parallelie the batches between the TPU cores. The dataset will be a direct mapping of each data point to a certain index. This way we can use a distributed random sampler which will fetch batches from different locations in the dataset and send them to each core of the TPU. But what if the dataset does not fit into memory. Than we can use IterableDatasets, which will not have acces to random indexes in the dataset and it will not work by default with distributed sampler. So we had to implement the distributed sampler manualy.
+    The biggest challenge when fine-tunning a LLM is the dataset size. We can use Pytorch XLA to create a training process on each core of the TPU. If the data fits in the memory of one TPU core than is easy. You just read the whole dataset in the TPU memory, and the dataloader will parallelize the batches between the TPU cores. Reading the whole dataset into memory will help with random sampling. The dataset will be like a map which links each data point to a certain index. This way we can use a distributed random sampler which will fetch batches from different locations in the dataset and send them to each core of the TPU.
+    But what if the dataset does not fit into memory. Here we can use datasets streaming and IterableDatasets, which will not have acces to random indexes in the dataset and it will not work by default with distributed sampler. Streaming datasets means that the data is downloaded progressively as you iterate over the dataset. So we had to implement the distributed sampler manualy.
 
-In essence, a model requires 4 files for training:
-
-1. ``ro_<model>_<size>.gin`` 
-2. ``ro_<model>_<size>_tasks.py``
-3. ``ro_<model>_<size>_pretrain.gin``
-4. ``ro_<model>_<size>.sh``
 
 Let's take an example and say we want to train a T5x base model from scratch. Thus, we have model=t5x and size=base. 
 
