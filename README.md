@@ -92,29 +92,29 @@ def my_collate(batch):
 
     return text_batch_source_out, text_batch_target_out
 ```
-   * set the dataset name, and use_auth_token to True if the dataset is private 
-   * set streaming to True as we don't have to deal with disk space
-   * take care of the task name, as it's referenced in the gin file above
+* set the dataset name, and use_auth_token to True if the dataset is private 
+* set streaming to True as we don't have to deal with disk space
+* take care of the task name, as it's referenced in the gin file above
 
 3. Define dataset, model, tokenizer, optimzer: 
 
 ```python
-    NUM_EPOCHS = 10
-    max_length = 256
-    batch_size = 8
-    num_workers = 64
-    save_steps = 50000
-    model_path = "dumitrescustefan/mt5-base-romanian"
-    tokenizer = T5TokenizerFast.from_pretrained(model_path)
-    model = MT5ForConditionalGeneration.from_pretrained(model_path)
-    model.config.max_length = max_length
-    device = xm.xla_device()
-    model.to(device)
-    # distributed params
+NUM_EPOCHS = 10
+max_length = 256
+batch_size = 8
+num_workers = 64
+save_steps = 50000
+model_path = "dumitrescustefan/mt5-base-romanian"
+tokenizer = T5TokenizerFast.from_pretrained(model_path)
+model = MT5ForConditionalGeneration.from_pretrained(model_path)
+model.config.max_length = max_length
+device = xm.xla_device()
+model.to(device)
+# distributed params
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=my_collate, pin_memory=True, drop_last = True)
+train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=my_collate, pin_memory=True, drop_last = True)
 
-    optimizer = Adafactor(
+optimizer = Adafactor(
                     model.parameters(),
                     lr=1e-4,
                     eps=(1e-30, 1e-3),
@@ -125,43 +125,43 @@ def my_collate(batch):
                     relative_step=False,
                     scale_parameter=False,
                     warmup_init=False,
-               )
+           )
 ```
 
 4. Define traininig loop:
 
 ```python
-    step = 0
-    # Training
-    for epoch in tqdm(range(NUM_EPOCHS)):
-        xm.master_print(f"Epoch:", epoch)
-        para_loader = pl.ParallelLoader(train_dataloader, [device])
+step = 0
+# Training
+for epoch in tqdm(range(NUM_EPOCHS)):
+    xm.master_print(f"Epoch:", epoch)
+    para_loader = pl.ParallelLoader(train_dataloader, [device])
 
-        for batch in tqdm(para_loader.per_device_loader(device)):
-            model.train()
+    for batch in tqdm(para_loader.per_device_loader(device)):
+        model.train()
 
-            batch_source, batch_target = batch[0], batch[1]
-            lm_labels = batch_target["input_ids"].to(device)
+        batch_source, batch_target = batch[0], batch[1]
+        lm_labels = batch_target["input_ids"].to(device)
 
-            input_ids = batch_source["input_ids"].to(device)
-            attention_mask_enc = batch_source["attention_mask"].to(device)
-            labels = batch_target["input_ids"].to(device)
-            attention_mask_dec = batch_target['attention_mask'].to(device)
-            optimizer.zero_grad()
+        input_ids = batch_source["input_ids"].to(device)
+        attention_mask_enc = batch_source["attention_mask"].to(device)
+        labels = batch_target["input_ids"].to(device)
+        attention_mask_dec = batch_target['attention_mask'].to(device)
+        optimizer.zero_grad()
 
-            outputs = model(input_ids=input_ids,
+        outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask_enc,
                             labels=labels, 
                             decoder_attention_mask=attention_mask_dec)
-            loss = outputs.loss
-            xm.master_print("Loss:", loss.item())
-            loss.backward()
-            optimizer.step()
-            xm.mark_step()
-            step += 1
+        loss = outputs.loss
+        xm.master_print("Loss:", loss.item())
+        loss.backward()
+        optimizer.step()
+        xm.mark_step()
+        step += 1
 
-            if step % save_steps == 0:
-                model.save_pretrained("finetuned_t5_diacritics_"+str(save_steps))
+        if step % save_steps == 0:
+            model.save_pretrained("finetuned_t5_diacritics_"+str(save_steps))
 
 
 
@@ -172,10 +172,9 @@ def _mp_fn(rank, flags):
 FLAGS={}
 xmp.spawn(_mp_fn, args=(FLAGS,), nprocs=8, start_method='fork')
 ```
-   * ``PROJECT_DIR=${HOME}"/models/t5x_models"`` note where you save the models (see Section 3)
-   * ``T5X_DIR="../../t5x"`` directory where the t5x is cloned (see Section 3)
-   * ``MODEL_DIR="gs://myv4-bucket/ro_t5x_base"`` where to save the checkpoints and all the training logs and other files (bucket)
-   * ``GIN_FILE="ro_t5x_base.gin"`` link to the gin file above
+
+* ``PROJECT_DIR=${HOME}"/models/t5x_models"`` note where you save the models (see Section 3)
+
 
 
 #### TPU setup
@@ -183,36 +182,7 @@ xmp.spawn(_mp_fn, args=(FLAGS,), nprocs=8, start_method='fork')
 After ssh-ing into *each* pod slice, run directly: 
 
 ```bash
-# replace with your GCP project and zone where the TPU was created
-printf "1\n<project_name>\nY\n<zone>\n" | gcloud init
 
-sudo apt-get update && sudo apt install -y git-lfs mc sshfs htop
-
-git lfs install
-pip install -U pip
-git clone --branch=main https://github.com/google-research/t5x
-sudo pip uninstall jax jaxlib libtpu-nightly libtpu libtpu-tpuv4 -y
-pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.htm
-pip install datasets
-python3 -m pip install -e 't5x/.[tpu]' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-
-pip install tensorflow==2.9.0
-
-# set git email and name 
-git config --global user.email "<email>" && git config --global user.name "<name>" && git config --global credential.helper store
-
-sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
-echo "export PATH='~/.local/bin:$PATH'" >> ~/.bashrc && source ~/.bashrc
-
-# if you use private corpora you need to copy-paste a token here 
-python -c "from huggingface_hub.hf_api import HfFolder; HfFolder.save_token('<hf_token_obtained_from_the_hf_website>')"
-
-mkdir models
-cd models
-
-# use your repo here, note the name that needs to match with the training scripts (here is t5x_models)
-git clone https://github.com/dumitrescustefan/t5x_models.git
-cd t5x_models
 ```
  
 
@@ -220,9 +190,8 @@ cd t5x_models
 
 Many thanks to the **Tensorflow Research Credits (TRC) team** without which these models would not have been possible to train and opensource. Their support team was quick and helpful throughout the months I've had TRC credits. If only the TPU on-line documentation was as good as their support :)
 
-I've found that the v4s are much more stable than the v3s; maybe it was a capacity issue with the v3s, but considering they were all on-demand, I've never had a v3 run for more than a week or two without some reset and a new IP address. The v4s never crashed even once. Plus, they are a beast of a device: training a 1.2B model for 4M steps in 2-3 weeks on a v4-32 is amazing.
 
 _Yours truly,_ 
 
-_[Stefan Dumitrescu](https://github.com/dumitrescustefan), [Mihai Ilie](https://github.com/iliemihai) and [Per Egil Kummervold](https://huggingface.co/north)_
+_[Stefan Dumitrescu](https://github.com/dumitrescustefan), [Mihai Ilie](https://github.com/iliemihai)
 
