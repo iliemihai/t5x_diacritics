@@ -210,5 +210,5 @@ Many thanks to the **Tensorflow Research Credits (TRC) team** without which thes
 
 _Yours truly,_ 
 
-_[Stefan Dumitrescu](https://github.com/dumitrescustefan), [Mihai Ilie](https://github.com/iliemihai)_
+_[Stefan Dumitrescu](https://github.com/dumitrescustefan), [Mihai Ilie](https://github.com/iliemihai) and [Per Egil Kummervold](https://huggingface.co/north)_
 
